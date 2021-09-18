@@ -51,6 +51,7 @@ lazy_static! {
     pub static ref LD_VIRTCPUID_PATH: PathBuf = NO_PRESERVE_FF_DIR.join("ld-virtcpuid.so");
     pub static ref LIBVIRTCPUID_PATH: PathBuf = NO_PRESERVE_FF_DIR.join("libvirtcpuid.so");
     pub static ref LIBVIRTTIME_PATH: PathBuf  = NO_PRESERVE_FF_DIR.join("libvirttime.so");
+    pub static ref FF_SOCKET_PATH: PathBuf  = NO_PRESERVE_FF_DIR.join("fastfreeze.sock");
 
     pub static ref LD_INJECT_ENV_PATH: PathBuf  = FF_DIR.join("ld-inject.env");
     pub static ref VIRT_TIME_CONF_PATH: PathBuf = FF_DIR.join("virttime-conf.bin");

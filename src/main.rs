@@ -27,6 +27,8 @@ pub mod image_streamer;
 pub mod lock;
 pub mod signal;
 pub mod container;
+pub mod ff_socket;
+pub mod poller;
 
 #[macro_use]
 extern crate anyhow;

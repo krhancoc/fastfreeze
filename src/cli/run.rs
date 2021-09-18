@@ -43,6 +43,7 @@ use crate::{
     lock::with_checkpoint_restore_lock,
     container,
     criu,
+    ff_socket::FastFreezeListener,
 };
 use virt::time::Nanos;
 
@@ -598,6 +599,8 @@ impl super::CLI for Run {
 
             let preserved_paths = preserved_paths.into_iter().collect();
 
+            let daemon = FastFreezeListener::bind()?.into_daemon()?;
+
             with_checkpoint_restore_lock(|| do_run(
                 image_url, app_args, preserved_paths, tcp_listen_remap,
                 passphrase_file, no_restore, allow_bad_image_version,
@@ -614,6 +617,7 @@ impl super::CLI for Run {
                 info!("Application exited with exit_code=0");
             }
 
+            let _ = daemon.stop();
             // The existance of the app config indicates if the app may b
             // running (see is_app_running()), so it's better to take it out.
             if let Err(e) = AppConfig::remove() {
