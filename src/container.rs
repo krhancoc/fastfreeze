@@ -18,7 +18,7 @@ use std::{
     path::PathBuf,
     io::ErrorKind,
     path::Path,
-    os::unix::io::{RawFd},
+    os::unix::io::RawFd,
     collections::HashSet,
     io::prelude::*,
     thread::sleep,

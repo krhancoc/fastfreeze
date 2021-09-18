@@ -57,35 +57,35 @@ ENVS:
 pub struct Checkpoint {
     /// Image URL, defaults to the value used during the run command
     #[structopt(short, long)]
-    image_url: Option<String>,
+    pub image_url: Option<String>,
 
     /// Dir/file to include in the image in addition to the ones specified during the run command.
     /// May be specified multiple times. Multiple paths can also be specified colon separated.
     // require_delimiter is set to avoid clap's non-standard way of accepting lists.
     #[structopt(long="preserve-path", name="path", require_delimiter=true, value_delimiter=":")]
-    preserved_paths: Vec<PathBuf>,
+    pub preserved_paths: Vec<PathBuf>,
 
     /// Leave application running after checkpoint
     #[structopt(long)]
-    leave_running: bool,
+    pub leave_running: bool,
 
     /// Level of parallelism. Split the image in multiple shards.
     // We use a default of 4 shards to benefit from some parallelism.
     // It should be set to something related to the number of CPUs available.
     #[structopt(long, default_value="4")]
-    num_shards: u32,
+    pub num_shards: u32,
 
     /// Amount of CPU at disposal. Possible values are [low, medium, high].
     /// Currently, `low` skips compression, `medium` uses lz4, and
     /// `high` uses zstd.
     #[structopt(long, default_value="medium")]
-    cpu_budget: CpuBudget,
+    pub cpu_budget: CpuBudget,
 
     /// Enable image encryption. This points to a file containing a passphrase
     /// used to encrypt the image. The passphrase should contain at least 256 bits
     /// of entropy.
     #[structopt(long)]
-    passphrase_file: Option<PathBuf>,
+    pub passphrase_file: Option<PathBuf>,
 
     /// Verbosity. Can be repeated
     #[structopt(short, long, parse(from_occurrences))]
@@ -94,7 +94,7 @@ pub struct Checkpoint {
     /// Checkpoint the specified application. See the run command help about
     /// --app-name for more details.
     #[structopt()]
-    app_name: Option<String>,
+    pub app_name: Option<String>,
 }
 
 pub fn do_checkpoint(opts: Checkpoint) -> Result<Stats> {

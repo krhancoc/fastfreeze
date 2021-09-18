@@ -41,6 +41,7 @@ use crate::{
     filesystem,
     image_streamer::{Stats, ImageStreamer},
     lock::with_checkpoint_restore_lock,
+    ff_socket::FastFreezeListener,
     container,
     criu,
 };
@@ -631,6 +632,8 @@ impl super::CLI for Run {
 
             let preserved_paths = preserved_paths.into_iter().collect();
 
+            let daemon = FastFreezeListener::bind()?.into_daemon()?;
+
             with_checkpoint_restore_lock(|| do_run(
                 privileges,
                 image_url, app_args, preserved_paths, tcp_listen_remap,
@@ -643,10 +646,13 @@ impl super::CLI for Run {
                     .spawn()?;
             }
 
+
             let app_exit_result = monitor_child(Pid::from_raw(APP_ROOT_PID));
             if app_exit_result.is_ok() {
                 info!("Application exited with exit_code=0");
             }
+
+            let _ = daemon.stop();
 
             // The existance of the app config indicates if the app may b
             // running (see is_app_running()), so it's better to take it out.

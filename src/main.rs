@@ -28,6 +28,8 @@ pub mod lock;
 pub mod signal;
 pub mod container;
 pub mod shared_mem;
+pub mod ff_socket;
+pub mod poller;
 
 #[macro_use]
 extern crate anyhow;
