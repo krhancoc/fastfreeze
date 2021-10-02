@@ -110,6 +110,15 @@ pub struct Pipe {
     pub write: fs::File,
 }
 
+impl Clone for Pipe {
+    fn clone(&self) -> Self {
+        Self {
+            read: self.read.try_clone().expect("Could not clone"),
+            write: self.write.try_clone().expect("Could not clone"),
+        }
+    }
+}
+
 impl Pipe {
     pub fn new(flags: OFlag) -> Result<Self> {
         let (fd_r, fd_w) = pipe2(flags).context("Failed to create a pipe")?;

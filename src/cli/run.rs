@@ -15,6 +15,7 @@
 use crate::{
     cli::{install, ExitCode},
     consts::*,
+    ff_socket::FastFreezeListener,
     container, criu, filesystem,
     image::{check_passphrase_file_exists, shard, ImageManifest, ManifestFetchResult},
     image_streamer::{ImageStreamer, Stats},
@@ -31,14 +32,10 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use nix::{
-    errno::Errno,
-    poll::{poll, PollFd, PollFlags},
     sys::signal,
-    sys::socket::{socketpair, AddressFamily, SockFlag, SockType},
-    unistd::{close, Pid},
+    unistd::Pid,
 };
 use serde::{Deserialize, Serialize};
-use std::os::unix::io::RawFd;
 use std::{
     collections::HashSet,
     ffi::OsString,
@@ -211,7 +208,6 @@ fn restore(
     passphrase_file: Option<PathBuf>,
     shard_download_cmds: Vec<String>,
     leave_stopped: bool,
-    checkpoint_sock: RawFd,
 ) -> Result<(Stats, Duration)> {
     info!(
         "Restoring application{}",
@@ -354,15 +350,11 @@ fn restore(
         .wait_for_socket_init()
         .map_err(&mut check_pgrp_err)?;
 
-    // Set the proper environment variable for the application
-    let sock_str = format!("{}", checkpoint_sock);
-
     // Restore application processes.
     // We become the parent of the application as CRIU is configured to use CLONE_PARENT.
     debug!("Restoring processes");
     criu::criu_restore_cmd(leave_stopped, &previously_inherited_resources)
         .enable_stderr_logging("criu")
-        .env(CONTAINER_SOCK, sock_str)
         .spawn()
         .and_then(|ps| {
             ensure!(
@@ -396,7 +388,6 @@ fn run_from_scratch(
     preserved_paths: HashSet<PathBuf>,
     passphrase_file: Option<PathBuf>,
     app_cmd: Vec<OsString>,
-    checkpoint_sock: RawFd,
 ) -> Result<()> {
     let inherited_resources = criu::InheritableResources::current()?;
 
@@ -427,10 +418,6 @@ fn run_from_scratch(
     }
 
     cmd.env("FASTFREEZE", "1");
-
-    // Set the proper environment variable for the application
-    let sock_str = format!("{}", checkpoint_sock);
-    cmd.env(CONTAINER_SOCK, sock_str);
 
     // We don't set the application in a process group because we want to be
     // compatible with both of these usages:
@@ -518,7 +505,6 @@ fn do_run(
     no_restore: bool,
     allow_bad_image_version: bool,
     leave_stopped: bool,
-    checkpoint_sock: RawFd,
 ) -> Result<()> {
     // Holding the `with_checkpoint_restore_lock` lock (done by caller) while
     // invoking any process (e.g., `criu_check_cmd`) is preferrable to avoid
@@ -560,8 +546,7 @@ fn do_run(
                         tcp_listen_remaps,
                         passphrase_file,
                         shard_download_cmds,
-                        leave_stopped,
-                        checkpoint_sock,
+                        leave_stopped
                     )
                     .context(ExitCode(EXIT_CODE_RESTORE_FAILURE))
                 },
@@ -586,7 +571,6 @@ fn do_run(
                         preserved_paths,
                         passphrase_file,
                         app_args,
-                        checkpoint_sock,
                     )
                 },
                 |_| json!({}),
@@ -693,65 +677,17 @@ impl super::CLI for Run {
 
             let preserved_paths = preserved_paths.into_iter().collect();
 
-            let (daemon_side, application_side) = socketpair(
-                AddressFamily::Unix,
-                SockType::Stream,
-                None,
-                SockFlag::empty(),
-            )
-            .expect("Unable to create socketpair");
-            let os_str = OsString::from(&CONTAINER_SOCK);
-            let from_str = format!("{}", daemon_side);
+            let daemon = FastFreezeListener::bind()?.into_daemon()?;
 
-            with_checkpoint_restore_lock(|| {
-                do_run(
-                    image_url,
-                    app_args,
-                    preserved_paths,
-                    tcp_listen_remap,
-                    passphrase_file,
-                    no_restore,
-                    allow_bad_image_version,
-                    leave_stopped,
-                    application_side,
-                )
-            })?;
-
-            let _ = close(application_side);
+            with_checkpoint_restore_lock(|| do_run(
+                image_url, app_args, preserved_paths, tcp_listen_remap,
+                passphrase_file, no_restore, allow_bad_image_version,
+                leave_stopped))?;
 
             if let Some(on_app_ready_cmd) = on_app_ready_cmd {
                 // Fire and forget.
                 Command::new_shell(&on_app_ready_cmd)
-                    .env(&os_str, from_str)
                     .spawn()?;
-            }
-
-            let flags = PollFlags::POLLIN | PollFlags::POLLHUP;
-            let mut fds = [PollFd::new(daemon_side, flags)];
-
-            loop {
-                match poll(&mut fds, 1000) {
-                    Ok(nfds) => {
-                        if nfds == 0 {
-                            continue;
-                        }
-                        // We only have one fd in this poll
-                        if let Some(e) = fds[0].revents() {
-                            if (e & PollFlags::POLLHUP) != PollFlags::empty() {
-                                // They have closed this file descriptor meaning
-                                // the program should be ended.
-                                debug!("Hangup recieved");
-                                break;
-                            }
-
-                            if (e & PollFlags::POLLIN) != PollFlags::empty() {
-                                debug!("Message recieved from application");
-                                // Handle Message
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
             }
 
             let app_exit_result = monitor_child(Pid::from_raw(APP_ROOT_PID));
@@ -759,6 +695,7 @@ impl super::CLI for Run {
                 info!("Application exited with exit_code=0");
             }
 
+            let _ = daemon.stop();
             // The existance of the app config indicates if the app may b
             // running (see is_app_running()), so it's better to take it out.
             if let Err(e) = AppConfig::remove() {
