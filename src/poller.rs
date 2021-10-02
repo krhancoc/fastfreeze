@@ -19,7 +19,7 @@ use std::{
 };
 use slab::Slab;
 use nix::{
-    sys::epoll::{epoll_create, epoll_ctl, epoll_wait, EpollOp, EpollEvent},
+    sys::epoll::{epoll_create1, epoll_ctl, epoll_wait, EpollOp, EpollEvent, EpollCreateFlags},
     unistd::close,
     errno::Errno,
     Error,
@@ -43,7 +43,7 @@ pub type Key = usize;
 
 impl<T> Poller<T> {
     pub fn new() -> Result<Self> {
-        let epoll_fd = epoll_create().context("Failed to create epoll")?;
+        let epoll_fd =epoll_create1(EpollCreateFlags::EPOLL_CLOEXEC).context("Failed to create epoll")?;
         let slab = Slab::new();
         let pending_events = Vec::new();
 
