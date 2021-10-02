@@ -46,7 +46,6 @@ use crate::{
         setns, readlink_fd, get_inheritable_fds, is_term
     },
     logger,
-    ff_socket::FastFreezeListener,
 };
 
 /// FastFreeze requires the following to run applications:

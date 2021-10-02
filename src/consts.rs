@@ -12,14 +12,8 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-use std::{
-    time::Instant,
-    path::PathBuf,
-};
-use crate::util::{
-    gen_random_alphanum_string,
-    get_home_dir,
-};
+use crate::util::{gen_random_alphanum_string, get_home_dir};
+use std::{path::PathBuf, time::Instant};
 
 // This file gathers all fastfreeze hard-coded settings
 
@@ -75,6 +69,7 @@ lazy_static! {
 
 /// Arbitrary application PID. Has to be bigger than 300 due to the way we do PID control
 pub const APP_ROOT_PID: i32 = 1000;
+pub const CONTAINER_SOCK: &str = "FASTFREEZE_SOCK_FD";
 
 /// When storing images, we use this filename to store our manifest
 pub const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -112,10 +107,10 @@ lazy_static! {
 pub const LIB_SEARCH_PATHS: &[&str] = &["/lib64", "/usr/lib", "/usr/local/lib"];
 
 pub const KB: usize = 1024;
-pub const MB: usize = 1024*1024;
-pub const GB: usize = 1024*1024*1024;
+pub const MB: usize = 1024 * 1024;
+pub const GB: usize = 1024 * 1024 * 1024;
 
-pub const PAGE_SIZE: usize = 4*KB;
+pub const PAGE_SIZE: usize = 4 * KB;
 
 lazy_static! {
     pub static ref START_TIME: Instant = Instant::now();
