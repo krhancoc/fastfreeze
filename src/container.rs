@@ -468,6 +468,7 @@ fn prepare_pid_namespace() -> Result<()> {
     unshare(CloneFlags::CLONE_NEWPID)
         .context("Failed to create PID namespace")?;
 
+
     if let ForkResult::Parent { child: container_pid } = fork()? {
         // We write down the container init process pid. It will be useful later
         // to entering the container when checkpointing (or with nsenter).
@@ -480,6 +481,8 @@ fn prepare_pid_namespace() -> Result<()> {
         container_monitor_exit_process(result);
         // unreachable
     }
+    let d = std::time::Duration::from_secs(1);
+    std::thread::sleep(d);
 
     // We are now in the new PID namespace, as the init process
 

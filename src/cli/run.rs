@@ -12,41 +12,40 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-use anyhow::{Result, Context};
-use std::{
-    io::{BufReader, BufWriter},
-    collections::HashSet,
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-    time::{SystemTime, Duration}
+use crate::{
+    cli::{install, ExitCode},
+    consts::*,
+    ff_socket::FastFreezeListener,
+    container, criu, filesystem,
+    image::{check_passphrase_file_exists, shard, ImageManifest, ManifestFetchResult},
+    image_streamer::{ImageStreamer, Stats},
+    lock::with_checkpoint_restore_lock,
+    metrics::{metrics_error_json, with_metrics, with_metrics_raw},
+    process::{
+        monitor_child, set_ns_last_pid, spawn_set_ns_last_pid_server, Command, CommandPidExt,
+        ProcessExt, ProcessGroup, Stdio, MIN_PID,
+    },
+    signal::kill_process_tree,
+    store::{ImageUrl, Store},
+    util::JsonMerge,
+    virt,
 };
+use anyhow::{Context, Result};
 use nix::{
     sys::signal,
     unistd::Pid,
 };
-use structopt::StructOpt;
-use serde::{Serialize, Deserialize};
-use crate::{
-    consts::*,
-    store::{ImageUrl, Store},
-    virt,
-    cli::{ExitCode, install},
-    image::{ManifestFetchResult, ImageManifest, shard, check_passphrase_file_exists},
-    process::{Command, CommandPidExt, ProcessExt, ProcessGroup, Stdio,
-              spawn_set_ns_last_pid_server, set_ns_last_pid, monitor_child, MIN_PID},
-    metrics::{with_metrics, with_metrics_raw, metrics_error_json},
-    signal::kill_process_tree,
-    util::JsonMerge,
-    filesystem,
-    image_streamer::{Stats, ImageStreamer},
-    lock::with_checkpoint_restore_lock,
-    container,
-    criu,
-    ff_socket::FastFreezeListener,
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    ffi::OsString,
+    fs,
+    io::{BufReader, BufWriter},
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
+use structopt::StructOpt;
 use virt::time::Nanos;
-
 
 /// Run application.
 /// If a checkpoint image exists, the application is restored. Otherwise, the
@@ -81,7 +80,7 @@ pub struct Run {
     ///   * file:image_path
     /// It defaults to file:$HOME/.fastfreeze/<app_name>
     // {n} means new line in the CLI's --help command
-    #[structopt(short, long, name="url")]
+    #[structopt(short, long, name = "url")]
     image_url: Option<String>,
 
     /// Application command, used when running the app from scratch.
@@ -91,7 +90,7 @@ pub struct Run {
 
     /// Shell command to run once the application is running.
     // Note: Type should be OsString, but structopt doesn't like it
-    #[structopt(long="on-app-ready", name="cmd")]
+    #[structopt(long = "on-app-ready", name = "cmd")]
     on_app_ready_cmd: Option<String>,
 
     /// Always run the app from scratch. Useful to ignore a faulty image.
@@ -111,7 +110,12 @@ pub struct Run {
     /// Dir/file to include in the checkpoint image.
     /// May be specified multiple times. Multiple paths can also be specified colon separated.
     // require_delimiter is set to avoid clap's non-standard way of accepting lists.
-    #[structopt(long="preserve-path", name="path", require_delimiter=true, value_delimiter=":")]
+    #[structopt(
+        long = "preserve-path",
+        name = "path",
+        require_delimiter = true,
+        value_delimiter = ":"
+    )]
     preserved_paths: Vec<PathBuf>,
 
     /// Remap the TCP listen socket ports during restore.
@@ -133,7 +137,7 @@ pub struct Run {
     /// Specify the application name. This is used to distinguish applications
     /// when running multiple ones. The default is the file name of the image-url.
     /// Note: application specific files are located in /tmp/fastfreeze/<app_name>.
-    #[structopt(short="n", long)]
+    #[structopt(short = "n", long)]
     app_name: Option<String>,
 
     /// Avoid the use of user, mount, or pid namespaces for running the application.
@@ -170,9 +174,13 @@ impl AppConfig {
     }
 
     pub fn restore() -> Result<AppConfig> {
-        let file = fs::File::open(&*APP_CONFIG_PATH)
-            .with_context(|| format!("Failed to open {}. \
-                It is created during the run command", APP_CONFIG_PATH.display()))?;
+        let file = fs::File::open(&*APP_CONFIG_PATH).with_context(|| {
+            format!(
+                "Failed to open {}. \
+                It is created during the run command",
+                APP_CONFIG_PATH.display()
+            )
+        })?;
         let file = BufReader::new(file);
         Ok(serde_json::from_reader(file)?)
     }
@@ -188,10 +196,8 @@ impl AppConfig {
 }
 
 pub fn is_app_running() -> bool {
-    AppConfig::exists() &&
-        Path::new("/proc").join(APP_ROOT_PID.to_string()).exists()
+    AppConfig::exists() && Path::new("/proc").join(APP_ROOT_PID.to_string()).exists()
 }
-
 
 // It returns Stats, that's the transfer speeds and all given by criu-image-streamer,
 // and the duration since the checkpoint happened. This is helpful for emitting metrics.
@@ -203,14 +209,26 @@ fn restore(
     shard_download_cmds: Vec<String>,
     leave_stopped: bool,
 ) -> Result<(Stats, Duration)> {
-    info!("Restoring application{}", if leave_stopped { " (leave stopped)" } else { "" });
+    info!(
+        "Restoring application{}",
+        if leave_stopped {
+            " (leave stopped)"
+        } else {
+            ""
+        }
+    );
     let mut pgrp = ProcessGroup::new()?;
 
-    let mut img_streamer = ImageStreamer::spawn_serve(shard_download_cmds.len(), tcp_listen_remaps)?;
+    let mut img_streamer =
+        ImageStreamer::spawn_serve(shard_download_cmds.len(), tcp_listen_remaps)?;
     img_streamer.process.join(&mut pgrp);
 
     // Spawn the download processes connected to the image streamer's input
-    for (i, (download_cmd, shard_pipe)) in shard_download_cmds.into_iter().zip(img_streamer.shard_pipes).enumerate() {
+    for (i, (download_cmd, shard_pipe)) in shard_download_cmds
+        .into_iter()
+        .zip(img_streamer.shard_pipes)
+        .enumerate()
+    {
         Command::new_shell(&download_cmd)
             .stdout(Stdio::from(shard_pipe))
             .enable_stderr_logging(format!("download shard {}", i))
@@ -239,7 +257,7 @@ fn restore(
     // we risk set_ns_last_pid and criu to go over APP_ROOT_PID if they are invoked via
     // bash scripts that do interesting things.
     // Note that later, we check that criu's pid is indeed lower than APP_ROOT_PID.
-    set_ns_last_pid(APP_ROOT_PID-100)?;
+    set_ns_last_pid(APP_ROOT_PID - 100)?;
 
     // The file system is back, including the application configuration containing user-defined
     // preserved-paths, and application time offset.
@@ -277,9 +295,13 @@ fn restore(
         // The duration between restore and checkpoint can therefore be inaccurate, and negative.
         // we'll clamp these negative values to 0.
         let restore_started_at = SystemTime::now() - START_TIME.elapsed();
-        let duration_since_checkpoint = restore_started_at.duration_since(old_config.created_at)
-            .unwrap_or_else(|_| Duration::new(0,0));
-        debug!("Duration between restore and checkpoint: {:.1}s", duration_since_checkpoint.as_secs_f64());
+        let duration_since_checkpoint = restore_started_at
+            .duration_since(old_config.created_at)
+            .unwrap_or_else(|_| Duration::new(0, 0));
+        debug!(
+            "Duration between restore and checkpoint: {:.1}s",
+            duration_since_checkpoint.as_secs_f64()
+        );
 
         // Adjust the libtimevirt offsets
         // Note that we do not add the duration_since_checkpoint to the clock.
@@ -289,8 +311,10 @@ fn restore(
         // includes the duration when the system was suspended.
         // For now, we don't worry much about the semantics of CLOCK_BOOTTIME.
         // Rare are the applications that use it.
-        debug!("Application clock: {:.1}s",
-            Duration::from_nanos(old_config.app_clock as u64).as_secs_f64());
+        debug!(
+            "Application clock: {:.1}s",
+            Duration::from_nanos(old_config.app_clock as u64).as_secs_f64()
+        );
         virt::time::ConfigPath::default().adjust_timespecs(old_config.app_clock)?;
 
         (duration_since_checkpoint, previously_inherited_resources)
@@ -299,8 +323,7 @@ fn restore(
     // We start the ns_last_pid daemon here. Note that we join_as_daemon() instead of join(),
     // this is so we don't wait for it in wait_for_success().
     debug!("Starting set_ns_last_pid server");
-    spawn_set_ns_last_pid_server()?
-        .join_as_daemon(&mut pgrp);
+    spawn_set_ns_last_pid_server()?.join_as_daemon(&mut pgrp);
 
     debug!("Continuing reading image in memory...");
 
@@ -308,16 +331,23 @@ fn restore(
     // which is a more interesting error to report than the error of wait_for_stats(),
     // (which would typically be a pipe read error)
     let mut check_pgrp_err = |err| {
-        if let Err(e) = pgrp.try_wait_for_success() { e }
-        else { err }
+        if let Err(e) = pgrp.try_wait_for_success() {
+            e
+        } else {
+            err
+        }
     };
 
-    let stats = img_streamer.progress.wait_for_stats()
+    let stats = img_streamer
+        .progress
+        .wait_for_stats()
         .map_err(&mut check_pgrp_err)?;
     stats.show();
 
     // Wait for the CRIU socket to be ready.
-    img_streamer.progress.wait_for_socket_init()
+    img_streamer
+        .progress
+        .wait_for_socket_init()
         .map_err(&mut check_pgrp_err)?;
 
     // Restore application processes.
@@ -327,7 +357,11 @@ fn restore(
         .enable_stderr_logging("criu")
         .spawn()
         .and_then(|ps| {
-            ensure!(ps.pid() < APP_ROOT_PID, "CRIU's pid is too high: {}", ps.pid());
+            ensure!(
+                ps.pid() < APP_ROOT_PID,
+                "CRIU's pid is too high: {}",
+                ps.pid()
+            );
             Ok(ps)
         })?
         .join(&mut pgrp);
@@ -341,7 +375,10 @@ fn restore(
         return Err(e);
     }
 
-    info!("Application is ready, restore took {:.1}s", START_TIME.elapsed().as_secs_f64());
+    info!(
+        "Application is ready, restore took {:.1}s",
+        START_TIME.elapsed().as_secs_f64()
+    );
 
     Ok((stats, duration_since_checkpoint))
 }
@@ -351,8 +388,7 @@ fn run_from_scratch(
     preserved_paths: HashSet<PathBuf>,
     passphrase_file: Option<PathBuf>,
     app_cmd: Vec<OsString>,
-) -> Result<()>
-{
+) -> Result<()> {
     let inherited_resources = criu::InheritableResources::current()?;
 
     let config = AppConfig {
@@ -368,15 +404,17 @@ fn run_from_scratch(
     virt::time::ConfigPath::default().write_intial()?;
     virt::enable_system_wide_virtualization()?;
 
-    ensure!(!app_cmd.is_empty(), "Error: application command must be specified");
+    ensure!(
+        !app_cmd.is_empty(),
+        "Error: application command must be specified"
+    );
     let mut cmd = Command::new(app_cmd);
     if let Some(path) = std::env::var_os("FF_APP_PATH") {
-        cmd.env_remove("FF_APP_PATH")
-           .env("PATH", path);
+        cmd.env_remove("FF_APP_PATH").env("PATH", path);
     }
     if let Some(library_path) = std::env::var_os("FF_APP_LD_LIBRARY_PATH") {
         cmd.env_remove("FF_APP_LD_LIBRARY_PATH")
-           .env("LD_LIBRARY_PATH", library_path);
+            .env("LD_LIBRARY_PATH", library_path);
     }
 
     cmd.env("FASTFREEZE", "1");
@@ -408,13 +446,20 @@ pub enum RunMode {
 }
 
 pub fn determine_run_mode(store: &dyn Store, allow_bad_image_version: bool) -> Result<RunMode> {
-    let fetch_result = with_metrics("fetch_manifest",
+    let fetch_result = with_metrics(
+        "fetch_manifest",
         || ImageManifest::fetch_from_store(store, allow_bad_image_version),
         |fetch_result| match fetch_result {
-            ManifestFetchResult::Some(_)              => json!({"manifest": "good",             "run_mode": "restore"}),
-            ManifestFetchResult::VersionMismatch {..} => json!({"manifest": "version_mismatch", "run_mode": "run_from_scratch"}),
-            ManifestFetchResult::NotFound             => json!({"manifest": "not_found",        "run_mode": "run_from_scratch"}),
-        }
+            ManifestFetchResult::Some(_) => {
+                json!({"manifest": "good",             "run_mode": "restore"})
+            }
+            ManifestFetchResult::VersionMismatch { .. } => {
+                json!({"manifest": "version_mismatch", "run_mode": "run_from_scratch"})
+            }
+            ManifestFetchResult::NotFound => {
+                json!({"manifest": "not_found",        "run_mode": "run_from_scratch"})
+            }
+        },
     )?;
 
     Ok(match fetch_result {
@@ -423,9 +468,12 @@ pub fn determine_run_mode(store: &dyn Store, allow_bad_image_version: bool) -> R
             RunMode::Restore { img_manifest }
         }
         ManifestFetchResult::VersionMismatch { fetched, desired } => {
-            info!("Image manifest found, but has version {} while the expected version is {}. \
+            info!(
+                "Image manifest found, but has version {} while the expected version is {}. \
                    You may try again with --allow-bad-image-version. \
-                   Running application from scratch", fetched, desired);
+                   Running application from scratch",
+                fetched, desired
+            );
             RunMode::FromScratch
         }
         ManifestFetchResult::NotFound => {
@@ -434,7 +482,6 @@ pub fn determine_run_mode(store: &dyn Store, allow_bad_image_version: bool) -> R
         }
     })
 }
-
 
 fn ensure_non_conflicting_pid() -> Result<()> {
     // We don't want to use a PID that could be potentially used by the
@@ -487,28 +534,47 @@ fn do_run(
 
     match (run_mode, app_args) {
         (RunMode::Restore { img_manifest }, _) => {
-            let shard_download_cmds = shard::download_cmds(
-                &img_manifest, passphrase_file.as_ref(), &*store)?;
+            let shard_download_cmds =
+                shard::download_cmds(&img_manifest, passphrase_file.as_ref(), &*store)?;
 
-            with_metrics("restore", ||
-                restore(
-                    image_url, preserved_paths, tcp_listen_remaps,
-                    passphrase_file, shard_download_cmds, leave_stopped
-                ).context(ExitCode(EXIT_CODE_RESTORE_FAILURE)),
-                |(stats, duration_since_checkpoint)|
+            with_metrics(
+                "restore",
+                || {
+                    restore(
+                        image_url,
+                        preserved_paths,
+                        tcp_listen_remaps,
+                        passphrase_file,
+                        shard_download_cmds,
+                        leave_stopped
+                    )
+                    .context(ExitCode(EXIT_CODE_RESTORE_FAILURE))
+                },
+                |(stats, duration_since_checkpoint)| {
                     json!({
                         "stats": stats,
                         "duration_since_checkpoint_sec": duration_since_checkpoint.as_secs_f64(),
                     })
-                )?;
+                },
+            )?;
         }
-        (RunMode::FromScratch, None) =>
-            bail!("No application to restore, but running in restore-only mode, aborting"),
+        (RunMode::FromScratch, None) => {
+            bail!("No application to restore, but running in restore-only mode, aborting")
+        }
         (RunMode::FromScratch, Some(app_args)) => {
             let app_args = app_args.into_iter().map(|s| s.into()).collect();
-            with_metrics("run_from_scratch", ||
-                run_from_scratch(image_url, preserved_paths, passphrase_file, app_args),
-                |_| json!({}))?;
+            with_metrics(
+                "run_from_scratch",
+                || {
+                    run_from_scratch(
+                        image_url,
+                        preserved_paths,
+                        passphrase_file,
+                        app_args,
+                    )
+                },
+                |_| json!({}),
+            )?;
         }
     }
 
@@ -521,16 +587,21 @@ fn default_image_name(app_args: &[OsString]) -> Result<String> {
 
     fn program_name(cmd: &OsString) -> Result<String> {
         Ok(Path::new(cmd)
-            .file_name().ok_or_else(||
-                anyhow!("Failed to determine program name from command name. \
-                         Please use `--image-url` to specify the image URL"))?
-            .to_string_lossy().into_owned())
+            .file_name()
+            .ok_or_else(|| {
+                anyhow!(
+                    "Failed to determine program name from command name. \
+                         Please use `--image-url` to specify the image URL"
+                )
+            })?
+            .to_string_lossy()
+            .into_owned())
     }
 
     Ok(match app_args {
         [] => unreachable!(),
         [app_name] => program_name(app_name)?,
-        _ =>  {
+        _ => {
             let hash = {
                 let mut hasher = DefaultHasher::new();
                 app_args.hash(&mut hasher);
@@ -546,10 +617,19 @@ impl super::CLI for Run {
     fn run(self) -> Result<()> {
         let inner = || -> Result<()> {
             let Self {
-                image_url, app_args, on_app_ready_cmd, no_restore,
-                allow_bad_image_version, passphrase_file, preserved_paths,
-                tcp_listen_remap, leave_stopped, verbose: _, app_name,
-                no_container } = self;
+                image_url,
+                app_args,
+                on_app_ready_cmd,
+                no_restore,
+                allow_bad_image_version,
+                passphrase_file,
+                preserved_paths,
+                tcp_listen_remap,
+                leave_stopped,
+                verbose: _,
+                app_name,
+                no_container,
+            } = self;
 
             // We allow app_args to be empty. This indicates a restore-only mode.
             let app_args = if app_args.is_empty() {
@@ -560,11 +640,9 @@ impl super::CLI for Run {
                 Some(app_args)
             };
 
-
             let image_url = match (image_url, app_args.as_ref()) {
                 (Some(image_url), _) => image_url,
-                (None, None) =>
-                    bail!("--image-url is necessary when running in restore-only mode"),
+                (None, None) => bail!("--image-url is necessary when running in restore-only mode"),
                 (None, Some(app_args)) => {
                     let image_path = DEFAULT_IMAGE_DIR.join(default_image_name(app_args)?);
                     let image_url = format!("file:{}", image_path.display());
@@ -628,18 +706,17 @@ impl super::CLI for Run {
         };
 
         // We use `with_metrics` to log the exit_code of the application and run time duration
-        with_metrics_raw("run", inner, |result|
-            match result {
-                Ok(()) => json!({
-                    "outcome": "success",
-                    "exit_code": 0,
-                }),
-                Err(e) => json!({
-                    "outcome": "error",
-                    "exit_code": ExitCode::from_error(&e),
-                    "error": format!("{:#}", e),
-                }).merge(metrics_error_json(e))
-            }
-        )
+        with_metrics_raw("run", inner, |result| match result {
+            Ok(()) => json!({
+                "outcome": "success",
+                "exit_code": 0,
+            }),
+            Err(e) => json!({
+                "outcome": "error",
+                "exit_code": ExitCode::from_error(&e),
+                "error": format!("{:#}", e),
+            })
+            .merge(metrics_error_json(e)),
+        })
     }
 }

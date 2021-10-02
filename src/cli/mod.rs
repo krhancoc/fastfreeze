@@ -13,7 +13,7 @@
 //  limitations under the License.
 
 pub mod run;
-mod checkpoint;
+pub mod checkpoint;
 mod extract;
 mod wait;
 pub mod install;

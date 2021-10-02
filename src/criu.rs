@@ -159,7 +159,7 @@ fn add_common_criu_opts(cmd: &mut Command) {
     ]);
 
     if log_enabled!(log::Level::Trace) {
-        cmd.arg("-v"); // verbose
+        cmd.arg("-v4"); // verbose
         cmd.arg("--display-stats");
     }
 
