@@ -1,7 +1,18 @@
 #/bin/sh
-date +"%T"
-echo $$
-sleep 5
-echo "Nothing" | nc -w 1 -U /var/tmp/fastfreeze/run/fastfreeze.sock
-sleep 30
-date +"%T"
+p=$(pwd)
+cd tests/checkpoint
+cargo b
+cd $p
+
+cargo b
+
+LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/dist/lib
+export LD_LIBRARY_PATH
+
+PATH=$PATH:$(pwd)/dist/bin
+export PATH
+
+echo $LD_LIBRARY_PATH
+echo $PATH
+
+./target/debug/fastfreeze run -vv -n test ./tests/checkpoint/target/debug/checkpoint

@@ -74,7 +74,6 @@ fn main_loop(listener: FastFreezeListener, stop_pipe_r: fs::File) -> Result<()> 
                 // arguments for `fastfreeze checkpoint`
                 match connection.read(&mut buf) {
                     Ok(size) => {
-                        println!("SIZE");
                         if size != 0 {
                             let cp = Checkpoint {
                                 image_url: None, 
@@ -93,7 +92,6 @@ fn main_loop(listener: FastFreezeListener, stop_pipe_r: fs::File) -> Result<()> 
                         }
                     }
                     Err(_) => {
-                        println!("SIZE OUT");
                         let _ = poller.remove(poll_key);
                     }
                 }
@@ -152,5 +150,3 @@ impl FastFreezeListener {
         Ok(FastFreezeDaemon { stop_pipe_w: unsafe { fs::File::from_raw_fd(pipe_w) }, thread: thread })
     }
 
-
-}
